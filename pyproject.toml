@@ -1,0 +1,16 @@
+[project]
+name = "scoop"
+version = "0.1.0"
+description = "Compile article clustering engine"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.8",
+    "mvlearn>=0.4.1",
+    "numpy>=2.2.6",
+    "pandas>=2.2.3",
+    "scikit-learn>=1.6.1",
+    "scipy>=1.15.3",
+    "sentence-transformers>=4.1.0",
+    "spacy>=3.8.7",
+    "torch>=2.7.0",
+]
