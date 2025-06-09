@@ -8,9 +8,11 @@ dependencies = [
     "mvlearn>=0.4.1",
     "numpy>=2.2.6",
     "pandas>=2.2.3",
+    "python-dotenv>=1.1.0",
     "scikit-learn>=1.6.1",
     "scipy>=1.15.3",
     "sentence-transformers>=4.1.0",
     "spacy>=3.8.7",
+    "supabase>=2.15.2",
     "torch>=2.7.0",
 ]
