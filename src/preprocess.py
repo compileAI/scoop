@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime, timezone
 import logging
 import os
+import time
 from typing import List, Iterable
 
 from google import genai
@@ -11,6 +12,7 @@ import pandas as pd
 import spacy
 from supabase import create_client
 from tqdm.auto import tqdm
+from pinecone import Pinecone
 
 from dotenv import load_dotenv
 
@@ -19,23 +21,26 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
 client = genai.Client(api_key=GOOGLE_API_KEY)
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+pc = Pinecone(api_key=PINECONE_API_KEY)
+pinecone_index = pc.Index("scraped-sources-gemini")
 
 # Simple logging setup
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO,  # Back to INFO now that we've debugged
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 log = logging.getLogger("preproc")
 
-# spaCy pipeline – blank model + sentencizer + lemmatizer
+# spaCy pipeline – blank model + sentencizer (removed lemmatizer to avoid lookup table issues)
 def build_nlp() -> spacy.language.Language:
     nlp = spacy.blank("en")
     nlp.add_pipe("sentencizer")
-    nlp.add_pipe("lemmatizer", config={"mode": "lookup"})
+    # Note: Removed lemmatizer as it requires lookup tables not available in blank model
     log.info("spaCy pipeline ready: %s", nlp.pipe_names)
     return nlp
 
@@ -43,14 +48,14 @@ nlp = build_nlp()
 
 # tokenisation helpers
 def _clean_token(tok: spacy.tokens.Token) -> str | None:
-    """Return a lowercase lemma or None if we should skip the token."""
+    """Return a lowercase token or None if we should skip the token."""
     if tok.is_alpha and not tok.is_punct and tok.text.lower() not in nlp.Defaults.stop_words:
-        return tok.lemma_.lower()
+        return tok.text.lower()  # Use text instead of lemma since we don't have lemmatizer
     return None
 
 def tokenize_texts(texts: Iterable[str], batch_size: int = 512) -> List[List[str]]:
     """
-    Lemmatise + stop-word-filter an iterable of texts.
+    Tokenize + stop-word-filter an iterable of texts.
     Returns a list-of-lists in the input order.
     """
     out: List[List[str]] = []
@@ -89,6 +94,12 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
     Adds: sentences, sentence_tokens, sentence_embds, sentence_counts
     """
     log.info("Dataframe shape before processing: %s", df.shape)
+    
+    # Handle empty DataFrame
+    if len(df) == 0:
+        log.warning("Empty DataFrame provided, returning empty processed DataFrame")
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text', 'sentences', 'sentence_counts', 'sentence_tokens', 'sentence_embds'])
+    
     required = {"id", "date", "title", "text"}
     missing = required - set(df.columns)
     if missing:
@@ -120,15 +131,105 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
         sentence_tokens.append(flat_tokens[idx : idx + count])
         idx += count
 
+    # Embedding with proper batching to respect Google API limits (max 100 requests per batch)
+    # API limit: 150 requests per minute, so we need more conservative timing to be safe
     embeddings = []
-    for batch in tqdm(
-        sentences, desc="Embedding sentences", total=len(sentences)
-    ):
-        batch_embeddings = client.models.embed_content(
-            model="text-embedding-004",
-            contents=batch,
-        )
-        embeddings.append(batch_embeddings)
+    max_batch_size = 100  # Google API limit
+    requests_per_minute = 120  # More conservative rate limit (leave bigger buffer)
+    delay_between_requests = 60.0 / requests_per_minute  # 0.5 seconds between requests
+    
+    for i, batch in enumerate(tqdm(sentences, desc="Embedding sentences", total=len(sentences))):
+        # Add delay after first request to respect rate limits
+        if i > 0:
+            time.sleep(delay_between_requests)
+            
+        try:
+            if len(batch) <= max_batch_size:
+                # Batch fits within API limit
+                batch_embeddings = client.models.embed_content(
+                    model="text-embedding-004",
+                    contents=batch,
+                )
+                # Extract the actual embedding values correctly
+                actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
+                embeddings.append(actual_embeddings)
+            else:
+                # Split large batches into smaller chunks
+                article_embeddings = []
+                for j, chunk_start in enumerate(range(0, len(batch), max_batch_size)):
+                    # Add delay between chunk requests too
+                    if j > 0:
+                        time.sleep(delay_between_requests)
+                        
+                    chunk = batch[chunk_start:chunk_start + max_batch_size]
+                    chunk_embeddings = client.models.embed_content(
+                        model="text-embedding-004",
+                        contents=chunk,
+                    )
+                    actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
+                    article_embeddings.extend(actual_embeddings)
+                embeddings.append(article_embeddings)
+        except Exception as e:
+            if "429" in str(e) or "RATE_LIMIT_EXCEEDED" in str(e):
+                log.warning(f"Rate limit hit, waiting 60 seconds before retrying...")
+                time.sleep(60)  # Wait a full minute
+                
+                # Retry the same batch with more conservative approach
+                max_retries = 3
+                retry_count = 0
+                while retry_count < max_retries:
+                    try:
+                        if len(batch) <= max_batch_size:
+                            batch_embeddings = client.models.embed_content(
+                                model="text-embedding-004",
+                                contents=batch,
+                            )
+                            actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
+                            embeddings.append(actual_embeddings)
+                            break  # Success, exit retry loop
+                        else:
+                            # Handle large batch retry
+                            article_embeddings = []
+                            for chunk_start in range(0, len(batch), max_batch_size):
+                                chunk = batch[chunk_start:chunk_start + max_batch_size]
+                                
+                                # Retry each chunk if needed
+                                chunk_retry_count = 0
+                                while chunk_retry_count < max_retries:
+                                    try:
+                                        chunk_embeddings = client.models.embed_content(
+                                            model="text-embedding-004",
+                                            contents=chunk,
+                                        )
+                                        actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
+                                        article_embeddings.extend(actual_embeddings)
+                                        break  # Success, exit chunk retry loop
+                                    except Exception as chunk_e:
+                                        if "429" in str(chunk_e) or "RATE_LIMIT_EXCEEDED" in str(chunk_e):
+                                            chunk_retry_count += 1
+                                            log.warning(f"Chunk retry {chunk_retry_count}/{max_retries}, waiting 30 seconds...")
+                                            time.sleep(30)
+                                        else:
+                                            raise chunk_e
+                                
+                                # Add delay between chunks
+                                if chunk_start + max_batch_size < len(batch):
+                                    time.sleep(delay_between_requests * 2)  # Double delay for safety
+                            embeddings.append(article_embeddings)
+                            break  # Success, exit retry loop
+                    except Exception as retry_e:
+                        if "429" in str(retry_e) or "RATE_LIMIT_EXCEEDED" in str(retry_e):
+                            retry_count += 1
+                            log.warning(f"Retry {retry_count}/{max_retries}, waiting {60 * retry_count} seconds...")
+                            time.sleep(60 * retry_count)  # Exponential backoff
+                        else:
+                            raise retry_e
+                
+                if retry_count >= max_retries:
+                    log.error(f"Failed to process batch after {max_retries} retries")
+                    raise Exception(f"Max retries exceeded for batch")
+            else:
+                raise  # Re-raise if it's not a rate limit error
 
     # assemble dataframe
     out = df.copy()
@@ -151,6 +252,18 @@ def read_todays_articles() -> pd.DataFrame:
     
     df = pd.DataFrame(df)
     
+    # Debug: Print available columns
+    log.info(f"Available columns from Supabase: {list(df.columns)}")
+    log.info(f"Number of rows returned: {len(df)}")
+    if len(df) > 0:
+        log.info(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
+    
+    # Handle empty DataFrame
+    if len(df) == 0:
+        log.warning("No articles found for today. Consider using --cold_start to process all articles.")
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
+    
     # Map columns to expected format
     column_mapping = {
         'id': 'id',
@@ -172,11 +285,26 @@ def read_todays_articles() -> pd.DataFrame:
 
 def read_all_articles() -> pd.DataFrame:
     """Read all articles from Supabase for cold-start processing."""
+    # Get all articles by setting a very high limit or using count first
+    total_count = supabase.table("source_articles").select("*", count="exact").execute().count
     df = supabase.table("source_articles") \
         .select("*") \
+        .limit(total_count if total_count else 10000) \
         .execute().data
     
     df = pd.DataFrame(df)
+    
+    # Debug: Print available columns
+    log.info(f"Available columns from Supabase: {list(df.columns)}")
+    log.info(f"Number of rows returned: {len(df)}")
+    if len(df) > 0:
+        log.info(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
+    
+    # Handle empty DataFrame
+    if len(df) == 0:
+        log.warning("No articles found in database.")
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
     
     # Map columns to expected format
     column_mapping = {
@@ -197,11 +325,140 @@ def read_all_articles() -> pd.DataFrame:
     
     return df
 
+def ensure_pinecone_namespace_exists(namespace: str = "chunks") -> None:
+    """Ensure the specified namespace exists in the Pinecone index."""
+    try:
+        # Check if namespace exists by trying to describe index stats for the namespace
+        stats = pinecone_index.describe_index_stats()
+        if namespace not in stats.get('namespaces', {}):
+            log.info(f"Creating Pinecone namespace '{namespace}'")
+            # Create namespace by upserting a dummy vector with non-zero values and then deleting it
+            dummy_vector = {
+                'id': 'dummy_init_vector',
+                'values': [0.1] * 768,  # Non-zero values for text-embedding-004 (768-dimensional)
+                'metadata': {'init': True}
+            }
+            pinecone_index.upsert(vectors=[dummy_vector], namespace=namespace)
+            # Delete the dummy vector
+            pinecone_index.delete(ids=['dummy_init_vector'], namespace=namespace)
+            log.info(f"Pinecone namespace '{namespace}' created successfully")
+        else:
+            log.info(f"Pinecone namespace '{namespace}' already exists")
+    except Exception as e:
+        log.error(f"Error ensuring Pinecone namespace exists: {e}")
+        raise
+
+def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> None:
+    """
+    Write processed articles to Supabase tables and embeddings to Pinecone.
+    
+    Args:
+        proc_df: DataFrame with columns: id, date, title, text, sentences, 
+                sentence_counts, sentence_tokens, sentence_embds
+    """
+    log.info(f"Writing {len(proc_df)} processed articles to Supabase and Pinecone")
+    
+    # Ensure the Pinecone namespace exists
+    ensure_pinecone_namespace_exists("chunks")
+    
+    total_chunks = 0
+    
+    for idx, row in tqdm(proc_df.iterrows(), total=len(proc_df), desc="Writing articles"):
+        try:
+            # Prepare data for cleaned_source_articles table
+            article_data = {
+                'source_article_id': row['id'],  # Reference to the original source_articles ID
+                'sentence_tokens': row['sentence_tokens'],  # Will be stored as JSON in the database
+                'sentence_counts': int(row['sentence_counts']),
+                'title': row['title'],
+                'text': row['text'],
+                'date': row['date']
+            }
+            
+            # Upsert into cleaned_source_articles (insert or update if exists)
+            # Use on_conflict parameter to specify which column to use for conflict resolution
+            article_result = supabase.table("cleaned_source_articles").upsert(
+                article_data, 
+                on_conflict="source_article_id"
+            ).execute()
+            
+            if not article_result.data:
+                log.error(f"Failed to upsert article {idx}")
+                continue
+                
+            source_article_id = row['id']  # Original string ID, now the unique identifier
+            log.debug(f"Upserted article with source_article_id: {source_article_id}")
+            
+            # Process each sentence as a chunk
+            sentences = row['sentences']
+            embeddings = row['sentence_embds']
+            
+            # First, delete any existing chunks for this article (in case we're reprocessing)
+            existing_chunks = supabase.table("cleaned_source_article_chunks").select("chunk_id").eq('source_article_id', source_article_id).execute()
+            if existing_chunks.data:
+                # Delete old Pinecone vectors
+                old_chunk_ids = [str(chunk['chunk_id']) for chunk in existing_chunks.data]
+                pinecone_index.delete(ids=old_chunk_ids, namespace="chunks")
+                log.debug(f"Deleted {len(old_chunk_ids)} old Pinecone vectors for source_article_id: {source_article_id}")
+            
+            # Delete existing chunks from database
+            supabase.table("cleaned_source_article_chunks").delete().eq('source_article_id', source_article_id).execute()
+            
+            # Prepare batch data for chunks
+            chunk_data = []
+            pinecone_vectors = []
+            
+            for sentence_idx, (sentence, embedding) in enumerate(zip(sentences, embeddings)):
+                chunk_record = {
+                    'text': sentence,
+                    'source_article_id': source_article_id  # Reference to original source_articles ID
+                }
+                chunk_data.append(chunk_record)
+            
+            # Batch insert chunks to get chunk_ids
+            if chunk_data:
+                chunk_result = supabase.table("cleaned_source_article_chunks").insert(chunk_data).execute()
+                
+                if chunk_result.data:
+                    # Now prepare Pinecone vectors with the actual chunk_ids
+                    for chunk_record, embedding in zip(chunk_result.data, embeddings):
+                        chunk_id = chunk_record['chunk_id']
+                        
+                        # embedding should already be a list of float values from the preprocessing
+                        embedding_values = list(embedding)
+                            
+                        pinecone_vectors.append({
+                            'id': str(chunk_id),
+                            'values': embedding_values,
+                            'metadata': {
+                                'source_article_id': source_article_id,    # Reference to source_articles.id
+                                'text': chunk_record['text'][:1000]        # Limit metadata text length
+                            }
+                        })
+                    
+                    # Batch upsert to Pinecone
+                    if pinecone_vectors:
+                        pinecone_index.upsert(
+                            vectors=pinecone_vectors,
+                            namespace="chunks"
+                        )
+                        total_chunks += len(pinecone_vectors)
+                        log.debug(f"Upserted {len(pinecone_vectors)} vectors to Pinecone for source_article_id: {source_article_id}")
+                else:
+                    log.error(f"Failed to insert chunks for source_article_id: {source_article_id}")
+            
+        except Exception as e:
+            log.error(f"Error processing article {idx}: {e}")
+            continue
+    
+    log.info(f"Successfully wrote {len(proc_df)} articles and {total_chunks} chunks to database and Pinecone")
+
 # quick CLI demo
 if __name__ == "__main__":
         
     parser = argparse.ArgumentParser(description='Process articles from Supabase')
     parser.add_argument('--cold_start', action='store_true', help='Process all articles (cold start)')
+    parser.add_argument('--limit', type=int, default=None, help='Limit number of articles to process (for testing)')
     args = parser.parse_args()
     
     if args.cold_start:
@@ -209,4 +466,10 @@ if __name__ == "__main__":
     else:
         df = read_todays_articles()
     
+    # Apply limit if specified
+    if args.limit:
+        df = df.head(args.limit)
+        log.info(f"Limited to {len(df)} articles for testing")
+    
     proc_df = preprocess_articles(df)
+    write_processed_articles_to_supabase_and_pinecone(proc_df)

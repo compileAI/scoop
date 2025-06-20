@@ -4,10 +4,12 @@ version = "0.1.0"
 description = "Compile article clustering engine"
 requires-python = ">=3.12"
 dependencies = [
+    "google-genai>=0.10.0",
     "matplotlib>=3.8",
     "mvlearn>=0.4.1",
     "numpy>=2.2.6",
     "pandas>=2.2.3",
+    "pinecone>=5.0.0",
     "python-dotenv>=1.1.0",
     "scikit-learn>=1.6.1",
     "scipy>=1.15.3",
@@ -15,4 +17,5 @@ dependencies = [
     "spacy>=3.8.7",
     "supabase>=2.15.2",
     "torch>=2.7.0",
+    "tqdm>=4.60.0",
 ]

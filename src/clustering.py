@@ -1,5 +1,3 @@
-"""clustering_core.py"""
-
 import pandas as pd
 import numpy as np
 import time
@@ -31,32 +29,76 @@ def spherical_kmeans(X, n_clusters, random_state=0):
     centres = normalize(km.cluster_centers_)
     return labels, centres
 
-def read_dataset(file_name, story_label, verbose):
-    article_df = pd.read_json(file_name)
-    article_df["sentence_embds"] = [np.array(x) for x in article_df["sentence_embds"]]
+def read_dataset(start_date, end_date, verbose):
+    """
+    Load dataset from database using date range.
+    
+    Args:
+        start_date: Start date in YYYY-mm-dd format
+        end_date: End date in YYYY-mm-dd format  
+        verbose: Whether to print loading information
+    
+    Returns:
+        tuple: (article_df, all_vocab) where article_df contains processed articles
+               and all_vocab contains the vocabulary for clustering
+    """
+    from datetime import datetime
+    from db_utils import fetch_processed_articles_since_date
+    
+    # Convert date strings to datetime objects
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+    
+    if verbose:
+        print(f"Loading articles from {start_date} to {end_date}")
+    
+    # Fetch articles since start date
+    article_df = fetch_processed_articles_since_date(start_dt)
+    
+    if len(article_df) == 0:
+        if verbose:
+            print("No articles found for the specified date range")
+        return pd.DataFrame(), []
+    
+    # Filter by end date
+    article_df = article_df[article_df['date'] <= end_dt].copy()
+    
+    if len(article_df) == 0:
+        if verbose:
+            print("No articles found after filtering by end date")
+        return pd.DataFrame(), []
+    
+    # Convert sentence_embds to numpy arrays if they aren't already
+    if len(article_df) > 0 and not isinstance(article_df.iloc[0]['sentence_embds'][0], np.ndarray):
+        article_df["sentence_embds"] = [
+            [np.array(emb) for emb in embds] for embds in article_df["sentence_embds"]
+        ]
 
+    # Set up TF-IDF vectorization using sentence tokens
     tfidf_vectorizer = TfidfVectorizer(
         ngram_range=(1, 2), tokenizer=lambda x: x, lowercase=False, norm=None
     )
     tfidf_vectorizer.fit_transform([sum(k, []) for k in article_df["sentence_tokens"]])
     all_vocab = tfidf_vectorizer.get_feature_names_out().tolist()
 
+    # Create count vectorizer with the same vocabulary
     count_vectorizer = CountVectorizer(
         tokenizer=lambda x: x,
         ngram_range=(1, 2),
         vocabulary=list(all_vocab),
         lowercase=False,
     )
+    
+    # Generate sentence TFs and article TFs
     article_df["sentence_TFs"] = [
         count_vectorizer.transform(y) for y in article_df["sentence_tokens"].values
     ]
     article_df["article_TF"] = [sum(a) for a in article_df["sentence_TFs"].values]
 
     if verbose:
-        print(f"{file_name} loaded")
-        print(f"articles:{len(article_df)}")
-        if story_label:
-            print(f"#stories:{len(article_df.story.unique())}")
+        print(f"Dataset loaded: {len(article_df)} articles")
+        print(f"Date range: {article_df['date'].min()} to {article_df['date'].max()}")
+        print(f"Vocabulary size: {len(all_vocab)}")
 
     return article_df, all_vocab
 
@@ -415,7 +457,8 @@ def update_cluster_keywords_articles(i, window, all_vocab, cluster_keywords_df, 
 # ------------------------------------------------------------------------------
 
 def simulate(
-    file_path,
+    start_date,
+    end_date,
     window_size,
     slide_size,
     num_windows,
@@ -424,13 +467,12 @@ def simulate(
     T,
     keyword_score,
     verbose,
-    story_label,
     time_aware=True,
     theme_aware=True,
 ):
 
-    article_df, all_vocab = read_dataset(file_path, story_label, verbose)
-    begin_date = article_df.date.iloc[0].strftime("%Y-%m-%d")
+    article_df, all_vocab = read_dataset(start_date, end_date, verbose)
+    begin_date = article_df.date.min().strftime("%Y-%m-%d")
 
     all_window, window, cluster_keywords_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     window_indices, article_df_slides = [], []
@@ -569,12 +611,8 @@ def simulate(
 
     all_window = pd.concat([all_window, window])
 
-    if story_label:
-        nmi, ami, ri, ari, precision, recall, fscore = [
-            np.round(k, 3) for k in np.mean(eval_metrics, axis=0)
-        ]
-    else:
-        nmi, ami, ri, ari, precision, recall, fscore = [0] * 7
+    # No story labels available from database, so set evaluation metrics to 0
+    nmi, ami, ri, ari, precision, recall, fscore = [0] * 7
 
     final_num_cluster = len(cluster_centers)
     avg_win_proc_time = np.round(np.mean(win_proc_times), 1)

@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""
+initial_batch_clustering.py
+
+Simple script to run clustering.simulate() on the last two weeks of articles
+and save the results to the database.
+"""
+
+import sys
+from pathlib import Path
+from datetime import datetime, timedelta
+
+# Add src to path so we can import modules
+sys.path.append(str(Path(__file__).parent.parent / "src"))
+
+from clustering import simulate
+from db_utils import save_clustering_results_to_db
+
+def main():
+    """Test clustering.simulate on the last two weeks of data."""
+    
+    # Hard-coded clustering parameters
+    window_size = 14        # days
+    slide_size = 7          # days  
+    num_windows = 10        # number of sliding windows
+    min_articles = 5        # minimum articles per cluster
+    N = 10                  # top N keywords
+    T = 4                   # similarity threshold parameter
+    keyword_score = "tfidf" # keyword scoring method
+    verbose = True          # verbose output
+    time_aware = True       # time-aware clustering
+    theme_aware = True      # theme-aware clustering
+    
+    # Calculate date range for last two weeks
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=14)
+    
+    # Format dates as strings
+    start_date_str = start_date.strftime('%Y-%m-%d')
+    end_date_str = end_date.strftime('%Y-%m-%d')
+    
+    print("🚀 Starting clustering simulation")
+    print("=" * 60)
+    print(f"📅 Date range: {start_date_str} to {end_date_str}")
+    print(f"📊 Parameters:")
+    print(f"   • Window size: {window_size} days")
+    print(f"   • Slide size: {slide_size} days")
+    print(f"   • Number of windows: {num_windows}")
+    print(f"   • Min articles per cluster: {min_articles}")
+    print(f"   • T parameter: {T}")
+    print(f"   • Top N keywords: {N}")
+    print(f"   • Keyword scoring: {keyword_score}")
+    print(f"   • Time aware: {time_aware}")
+    print(f"   • Theme aware: {theme_aware}")
+    print("=" * 60)
+    
+    try:
+        # Call clustering.simulate
+        result = simulate(
+            start_date=start_date_str,
+            end_date=end_date_str,
+            window_size=window_size,
+            slide_size=slide_size,
+            num_windows=num_windows,
+            min_articles=min_articles,
+            N=N,
+            T=T,
+            keyword_score=keyword_score,
+            verbose=verbose,
+            time_aware=time_aware,
+            theme_aware=theme_aware
+        )
+        
+        # Unpack results
+        (all_window, cluster_keywords_df, final_num_cluster, avg_win_proc_time,
+         nmi, ami, ri, ari, precision, recall, fscore) = result
+        
+        print("\n✅ Clustering simulation completed successfully!")
+        print("=" * 60)
+        print(f"📊 Results:")
+        print(f"   • Total articles processed: {len(all_window)}")
+        print(f"   • Final number of clusters: {final_num_cluster}")
+        print(f"   • Average window processing time: {avg_win_proc_time}s")
+        print(f"   • Clustered articles: {len(all_window[all_window['cluster'] >= 0])}")
+        print(f"   • Outlier articles: {len(all_window[all_window['cluster'] == -1])}")
+        
+        if len(cluster_keywords_df) > 0:
+            print(f"   • Cluster keywords DataFrame shape: {cluster_keywords_df.shape}")
+        
+        print("=" * 60)
+        
+        # Save results to database
+        print("\n💾 Saving clustering results to database...")
+        save_success = save_clustering_results_to_db(all_window, cluster_keywords_df)
+        
+        if save_success:
+            print("🎉 Clustering and database save completed successfully!")
+        else:
+            print("⚠️  Clustering completed but database save failed!")
+            
+        return save_success
+        
+    except Exception as e:
+        print(f"\n❌ Clustering simulation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1) 
