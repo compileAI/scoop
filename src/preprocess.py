@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timezone
 import logging
 import os
@@ -34,6 +33,11 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# Suppress verbose HTTP logging from supabase/httpx
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 log = logging.getLogger("preproc")
 
 # spaCy pipeline – blank model + sentencizer (removed lemmatizer to avoid lookup table issues)
@@ -453,22 +457,19 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
     
     log.info(f"Successfully wrote {len(proc_df)} articles and {total_chunks} chunks to database and Pinecone")
 
-# quick CLI demo
-if __name__ == "__main__":
-        
-    parser = argparse.ArgumentParser(description='Process articles from Supabase')
-    parser.add_argument('--cold_start', action='store_true', help='Process all articles (cold start)')
-    parser.add_argument('--limit', type=int, default=None, help='Limit number of articles to process (for testing)')
-    args = parser.parse_args()
-    
-    if args.cold_start:
-        df = read_all_articles()
-    else:
-        df = read_todays_articles()
+def main_daily():
+    """Process articles created today."""
+    df = read_todays_articles()
+    proc_df = preprocess_articles(df)
+    write_processed_articles_to_supabase_and_pinecone(proc_df)
+
+def main_all(limit=None):
+    """Process all articles (cold start)."""
+    df = read_all_articles()
     
     # Apply limit if specified
-    if args.limit:
-        df = df.head(args.limit)
+    if limit:
+        df = df.head(limit)
         log.info(f"Limited to {len(df)} articles for testing")
     
     proc_df = preprocess_articles(df)

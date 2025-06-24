@@ -511,6 +511,85 @@ def get_cluster_articles(cluster_id: int) -> List[str]:
         print(f"ERROR: Error getting cluster articles: {e}")
         return []
 
+def update_cluster_date_range(cluster_id: int) -> bool:
+    """
+    Update cluster date range based on the published dates of all assigned articles.
+    
+    Args:
+        cluster_id: ID of the cluster to update
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Get all article IDs assigned to this cluster
+        article_ids = get_cluster_articles(cluster_id)
+        
+        if not article_ids:
+            print(f"WARNING: No articles found for cluster {cluster_id}")
+            return True  # Not an error, just empty cluster
+        
+        # Query source_articles table to get published dates
+        # Use batch processing for large clusters
+        batch_size = 100
+        all_dates = []
+        
+        for i in range(0, len(article_ids), batch_size):
+            batch_ids = article_ids[i:i + batch_size]
+            
+            result = supabase.table('source_articles')\
+                .select("published")\
+                .in_("id", batch_ids)\
+                .execute()
+            
+            if result.data:
+                batch_dates = [row['published'] for row in result.data if row['published']]
+                all_dates.extend(batch_dates)
+        
+        if not all_dates:
+            print(f"WARNING: No published dates found for cluster {cluster_id} articles")
+            return True  # Not an error, just no dates
+        
+        # Convert to datetime objects and find min/max
+        from datetime import datetime
+        parsed_dates = []
+        for date_str in all_dates:
+            try:
+                if isinstance(date_str, str):
+                    # Parse ISO format datetime string
+                    parsed_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    parsed_dates.append(parsed_date)
+                elif hasattr(date_str, 'isoformat'):  # Already datetime object
+                    parsed_dates.append(date_str)
+            except Exception as e:
+                print(f"WARNING: Could not parse date {date_str}: {e}")
+                continue
+        
+        if not parsed_dates:
+            print(f"WARNING: No valid dates found for cluster {cluster_id}")
+            return True
+        
+        date_range_start = min(parsed_dates)
+        date_range_end = max(parsed_dates)
+        
+        # Update cluster metadata
+        update_data = {
+            "date_range_start": date_range_start.isoformat(),
+            "date_range_end": date_range_end.isoformat(),
+            "last_updated": datetime.now().isoformat()
+        }
+        
+        supabase.table(SUPABASE_CLUSTERS_TABLE)\
+            .update(update_data)\
+            .eq("cluster_id", cluster_id)\
+            .execute()
+        
+        return True
+        
+    except Exception as e:
+        print(f"ERROR: Error updating cluster date range for cluster {cluster_id}: {e}")
+        return False
+
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
