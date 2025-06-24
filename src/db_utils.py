@@ -122,8 +122,14 @@ def fetch_articles_from_supabase(date_filter: str,
                     date_value = date_value.split(",")[0]
                 query = query.gte("date", date_value)
         
+        # Set a higher default limit to handle large datasets
+        # If no limit specified, use a high limit to avoid truncation
         if limit:
             query = query.limit(limit)
+        else:
+            # Use a high limit (10,000) to avoid truncation of recent articles
+            # and order by date descending to get most recent first
+            query = query.order("date", desc=True).limit(10000)
         
         result = query.execute()
         df = pd.DataFrame(result.data)

@@ -70,11 +70,11 @@ def convert_clusters_to_simulate_format(existing_clusters, context_articles, win
     if len(existing_clusters) == 0:
         if verbose:
             print("⚠️  No existing clusters found - this will initialize new clusters")
-        return [], {}, {}, {}, {}, {}, {}
+        return [], [], [], {}, {}, {}, {}
 
     cluster_centers = []
-    cluster_emb_sum_dics = {}
-    cluster_tf_sum_dics = {}
+    cluster_emb_sum_dics = []  # List of dictionaries (not dict)
+    cluster_tf_sum_dics = []   # List of dictionaries (not dict)
     cluster_topN_indices = {}
     cluster_topN_scores = {}
     cluster_topN_probs = {}
@@ -125,9 +125,9 @@ def convert_clusters_to_simulate_format(existing_clusters, context_articles, win
             print(f"   • Cluster {db_cluster_id}: center type {type(cluster_center)}, shape {getattr(cluster_center, 'shape', 'No shape')}")
         cluster_centers.append(cluster_center)
         
-        # Initialize empty dictionaries using array indices (0-based)
-        cluster_emb_sum_dics[array_idx] = {}
-        cluster_tf_sum_dics[array_idx] = {}
+        # Initialize empty dictionaries and append to lists
+        cluster_emb_sum_dics.append({})
+        cluster_tf_sum_dics.append({})
         
         # Get articles assigned to this cluster within the window
         cluster_article_ids = get_cluster_articles(db_cluster_id)
