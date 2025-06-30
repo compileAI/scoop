@@ -389,8 +389,9 @@ def load_active_clusters() -> ClustersDF:
         if len(df) > 0:
             # Convert cluster_center back to numpy arrays
             df["cluster_center"] = df["cluster_center"].apply(np.array)
-            df["date_range_start"] = pd.to_datetime(df["date_range_start"])
-            df["date_range_end"] = pd.to_datetime(df["date_range_end"])
+            # Use format='ISO8601' to handle microseconds in timestamps
+            df["date_range_start"] = pd.to_datetime(df["date_range_start"], format='ISO8601')
+            df["date_range_end"] = pd.to_datetime(df["date_range_end"], format='ISO8601')
 
         return df
         

@@ -252,6 +252,13 @@ def assign_to_clusters(initial, verbose, window, window_size, to_date, cluster_c
         considered_center_indices = list(set(window[window['cluster']>=0]['cluster']))
 
     if verbose: print("Assign to "+str(len(considered_center_indices))+" clusters")
+    
+    # Handle case where there are no clusters - mark all articles as outliers
+    if len(considered_center_indices) == 0:
+        if verbose: print("No clusters available - marking all articles as outliers")
+        window.loc[window['cluster'] == -1, 'sim'] = 0.0
+        return window, cluster_emb_sum_dics, cluster_tf_sum_dics, time.time() - start_time
+    
     out_thred = (1-1/(len(considered_center_indices)+1))**T #+1 to handle a single cluster
 
     if theme_aware:
