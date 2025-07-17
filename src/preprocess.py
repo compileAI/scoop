@@ -109,9 +109,20 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
     if missing:
         raise ValueError(f"article_df missing columns: {missing!r}")
 
+    # Clean None values in title and text columns to prevent spaCy errors
+    df_clean = df.copy()
+    df_clean["title"] = df_clean["title"].fillna("")
+    df_clean["text"] = df_clean["text"].fillna("")
+    
+    # Log how many None values were cleaned
+    title_none_count = df["title"].isnull().sum()
+    text_none_count = df["text"].isnull().sum()
+    if title_none_count > 0 or text_none_count > 0:
+        log.info(f"Cleaned {title_none_count} None titles and {text_none_count} None text values")
+
     # sentence segmentation (title + body)
-    titles = df["title"].tolist()
-    bodies = df["text"].tolist()
+    titles = df_clean["title"].tolist()
+    bodies = df_clean["text"].tolist()
 
     # split bodies into sentences once, batched
     body_sents: List[List[str]] = []
@@ -235,8 +246,8 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
             else:
                 raise  # Re-raise if it's not a rate limit error
 
-    # assemble dataframe
-    out = df.copy()
+    # assemble dataframe using the cleaned data
+    out = df_clean.copy()
     out["sentences"] = sentences
     out["sentence_counts"] = sentence_counts
     out["sentence_tokens"] = sentence_tokens
