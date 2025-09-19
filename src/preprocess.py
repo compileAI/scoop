@@ -7,6 +7,7 @@ import time
 from typing import List, Iterable
 
 from google import genai
+from google.genai import types
 import pandas as pd
 import spacy
 from supabase import create_client
@@ -162,8 +163,9 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
             if len(batch) <= max_batch_size:
                 # Batch fits within API limit
                 batch_embeddings = client.models.embed_content(
-                    model="text-embedding-004",
+                    model="gemini-embedding-001",
                     contents=batch,
+                    config=types.EmbedContentConfig(task_type="CLUSTERING")
                 )
                 # Extract the actual embedding values correctly
                 actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
@@ -178,8 +180,9 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                         
                     chunk = batch[chunk_start:chunk_start + max_batch_size]
                     chunk_embeddings = client.models.embed_content(
-                        model="text-embedding-004",
+                        model="gemini-embedding-001",
                         contents=chunk,
+                        config=types.EmbedContentConfig(task_type="CLUSTERING")
                     )
                     actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
                     article_embeddings.extend(actual_embeddings)
@@ -350,7 +353,7 @@ def ensure_pinecone_namespace_exists(namespace: str = "chunks") -> None:
             # Create namespace by upserting a dummy vector with non-zero values and then deleting it
             dummy_vector = {
                 'id': 'dummy_init_vector',
-                'values': [0.1] * 768,  # Non-zero values for text-embedding-004 (768-dimensional)
+                'values': [0.1] * 3072,  # Non-zero values for gemini-embedding-001 (3072-dimensional)
                 'metadata': {'init': True}
             }
             pinecone_index.upsert(vectors=[dummy_vector], namespace=namespace)
@@ -374,7 +377,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
     log.info(f"Writing {len(proc_df)} processed articles to Supabase and Pinecone")
     
     # Ensure the Pinecone namespace exists
-    ensure_pinecone_namespace_exists("chunks")
+    ensure_pinecone_namespace_exists("source_article_clustering_chunks")
     
     total_chunks = 0
     
@@ -413,7 +416,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
             if existing_chunks.data:
                 # Delete old Pinecone vectors
                 old_chunk_ids = [str(chunk['chunk_id']) for chunk in existing_chunks.data]
-                pinecone_index.delete(ids=old_chunk_ids, namespace="chunks")
+                pinecone_index.delete(ids=old_chunk_ids, namespace="source_article_clustering_chunks")
                 log.debug(f"Deleted {len(old_chunk_ids)} old Pinecone vectors for source_article_id: {source_article_id}")
             
             # Delete existing chunks from database
@@ -455,7 +458,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
                     if pinecone_vectors:
                         pinecone_index.upsert(
                             vectors=pinecone_vectors,
-                            namespace="chunks"
+                            namespace="source_article_clustering_chunks"
                         )
                         total_chunks += len(pinecone_vectors)
                         log.debug(f"Upserted {len(pinecone_vectors)} vectors to Pinecone for source_article_id: {source_article_id}")
