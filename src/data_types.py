@@ -47,7 +47,7 @@ ChunksDict = Dict[str, List[ChunkData]]  # Mapping article_id -> list of chunks
 
 # Constants
 PINECONE_INDEX_NAME = "scraped-sources-gemini"
-PINECONE_NAMESPACE = "chunks"
+PINECONE_NAMESPACE = "source_article_clustering_chunks"
 SUPABASE_ARTICLES_TABLE = "cleaned_source_articles"
 SUPABASE_CHUNKS_TABLE = "cleaned_source_article_chunks"
 SUPABASE_CLUSTERS_TABLE = "clusters"

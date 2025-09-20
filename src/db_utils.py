@@ -102,6 +102,7 @@ def fetch_articles_from_supabase(date_filter: str,
                                 limit: Optional[int] = None) -> pd.DataFrame:
     """
     Fetch articles with date filtering from cleaned_source_articles.
+    Uses pagination to handle large datasets (Supabase has 1000 row limit per query).
     
     Args:
         date_filter: Date filter string for Supabase query
@@ -111,28 +112,66 @@ def fetch_articles_from_supabase(date_filter: str,
         DataFrame with article metadata
     """
     try:
-        query = supabase.table(SUPABASE_ARTICLES_TABLE).select("*")
+        # First, count total articles to determine pagination strategy
+        count_query = supabase.table(SUPABASE_ARTICLES_TABLE).select("*", count="exact")
         
-        # Apply date filter if provided
+        # Apply date filter to count query
         if date_filter:
-            # Parse date filter (simplified - assumes gte format)
             if "gte." in date_filter:
                 date_value = date_filter.split("gte.")[1]
                 if "," in date_value:
                     date_value = date_value.split(",")[0]
-                query = query.gte("date", date_value)
+                count_query = count_query.gte("date", date_value)
         
-        # Set a higher default limit to handle large datasets
-        # If no limit specified, use a high limit to avoid truncation
+        count_result = count_query.execute()
+        total_count = count_result.count
+        
+        print(f"INFO: Found {total_count} total articles in database")
+        
+        if total_count == 0:
+            print("WARNING: No articles found in database")
+            return pd.DataFrame()
+        
+        # Determine how many articles to fetch
         if limit:
-            query = query.limit(limit)
+            articles_to_fetch = min(limit, total_count)
         else:
-            # Use a high limit (10,000) to avoid truncation of recent articles
-            # and order by date descending to get most recent first
-            query = query.order("date", desc=True).limit(10000)
+            articles_to_fetch = total_count
         
-        result = query.execute()
-        df = pd.DataFrame(result.data)
+        print(f"INFO: Fetching {articles_to_fetch} articles using pagination")
+        
+        # Use pagination to fetch all articles
+        all_articles = []
+        batch_size = 1000  # Supabase limit per query
+        
+        for offset in range(0, articles_to_fetch, batch_size):
+            end_range = min(offset + batch_size - 1, articles_to_fetch - 1)
+            print(f"INFO: Fetching articles {offset} to {end_range} of {articles_to_fetch}")
+            
+            query = supabase.table(SUPABASE_ARTICLES_TABLE).select("*")
+            
+            # Apply date filter
+            if date_filter:
+                if "gte." in date_filter:
+                    date_value = date_filter.split("gte.")[1]
+                    if "," in date_value:
+                        date_value = date_value.split(",")[0]
+                    query = query.gte("date", date_value)
+            
+            # Apply pagination and ordering
+            query = query.order("date", desc=True).range(offset, end_range)
+            
+            result = query.execute()
+            batch_articles = result.data
+            all_articles.extend(batch_articles)
+            
+            print(f"INFO: Fetched {len(batch_articles)} articles in this batch")
+            
+            # If we got fewer articles than expected, we've reached the end
+            if len(batch_articles) < batch_size:
+                break
+        
+        df = pd.DataFrame(all_articles)
         
         if len(df) == 0:
             print("WARNING: No articles found in database")
@@ -142,7 +181,7 @@ def fetch_articles_from_supabase(date_filter: str,
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], format='ISO8601')
         
-        print(f"INFO: Fetched {len(df)} articles from database")
+        print(f"INFO: Successfully fetched {len(df)} articles from database")
         return df
         
     except Exception as e:
