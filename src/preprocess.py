@@ -18,6 +18,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from data_types import (
+    SUPABASE_ARTICLES_TABLE,
+    SUPABASE_CHUNKS_TABLE,
+)
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -165,7 +170,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                 batch_embeddings = client.models.embed_content(
                     model="gemini-embedding-001",
                     contents=batch,
-                    config=types.EmbedContentConfig(task_type="CLUSTERING")
+                    config=types.EmbedContentConfig(task_type="CLUSTERING", output_dimensionality=768)
                 )
                 # Extract the actual embedding values correctly
                 actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
@@ -182,7 +187,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                     chunk_embeddings = client.models.embed_content(
                         model="gemini-embedding-001",
                         contents=chunk,
-                        config=types.EmbedContentConfig(task_type="CLUSTERING")
+                        config=types.EmbedContentConfig(task_type="CLUSTERING", output_dimensionality=768)
                     )
                     actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
                     article_embeddings.extend(actual_embeddings)
@@ -303,14 +308,32 @@ def read_todays_articles() -> pd.DataFrame:
 
 def read_all_articles() -> pd.DataFrame:
     """Read all articles from Supabase for cold-start processing."""
-    # Get all articles by setting a very high limit or using count first
-    total_count = supabase.table("source_articles").select("*", count="exact").execute().count
-    df = supabase.table("source_articles") \
-        .select("*") \
-        .limit(total_count if total_count else 10000) \
-        .execute().data
+    # First, count the total number of articles
+    count_result = supabase.table("source_articles").select("*", count="exact").execute()
+    total_count = count_result.count
     
-    df = pd.DataFrame(df)
+    log.info(f"Found {total_count} total articles in database")
+    
+    if total_count == 0:
+        log.warning("No articles found in database.")
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
+    
+    # Use pagination to fetch all articles (Supabase has a 1000 row limit)
+    all_articles = []
+    batch_size = 1000
+    
+    for offset in range(0, total_count, batch_size):
+        end_range = min(offset + batch_size - 1, total_count - 1)
+        log.info(f"Fetching articles {offset} to {end_range} of {total_count}")
+        
+        batch_result = supabase.table("source_articles") \
+            .select("*") \
+            .range(offset, end_range) \
+            .execute()
+        
+        all_articles.extend(batch_result.data)
+    
+    df = pd.DataFrame(all_articles)
     
     # Debug: Print available columns
     log.info(f"Available columns from Supabase: {list(df.columns)}")
@@ -353,7 +376,7 @@ def ensure_pinecone_namespace_exists(namespace: str = "chunks") -> None:
             # Create namespace by upserting a dummy vector with non-zero values and then deleting it
             dummy_vector = {
                 'id': 'dummy_init_vector',
-                'values': [0.1] * 3072,  # Non-zero values for gemini-embedding-001 (3072-dimensional)
+                'values': [0.1] * 768,  # Non-zero values for gemini-embedding-001 (768-dimensional)
                 'metadata': {'init': True}
             }
             pinecone_index.upsert(vectors=[dummy_vector], namespace=namespace)
@@ -395,7 +418,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
             
             # Upsert into cleaned_source_articles (insert or update if exists)
             # Use on_conflict parameter to specify which column to use for conflict resolution
-            article_result = supabase.table("cleaned_source_articles").upsert(
+            article_result = supabase.table(SUPABASE_ARTICLES_TABLE).upsert(
                 article_data, 
                 on_conflict="source_article_id"
             ).execute()
@@ -412,7 +435,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
             embeddings = row['sentence_embds']
             
             # First, delete any existing chunks for this article (in case we're reprocessing)
-            existing_chunks = supabase.table("cleaned_source_article_chunks").select("chunk_id").eq('source_article_id', source_article_id).execute()
+            existing_chunks = supabase.table(SUPABASE_CHUNKS_TABLE).select("chunk_id").eq('source_article_id', source_article_id).execute()
             if existing_chunks.data:
                 # Delete old Pinecone vectors
                 old_chunk_ids = [str(chunk['chunk_id']) for chunk in existing_chunks.data]
@@ -420,7 +443,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
                 log.debug(f"Deleted {len(old_chunk_ids)} old Pinecone vectors for source_article_id: {source_article_id}")
             
             # Delete existing chunks from database
-            supabase.table("cleaned_source_article_chunks").delete().eq('source_article_id', source_article_id).execute()
+            supabase.table(SUPABASE_CHUNKS_TABLE).delete().eq('source_article_id', source_article_id).execute()
             
             # Prepare batch data for chunks
             chunk_data = []
@@ -435,7 +458,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
             
             # Batch insert chunks to get chunk_ids
             if chunk_data:
-                chunk_result = supabase.table("cleaned_source_article_chunks").insert(chunk_data).execute()
+                chunk_result = supabase.table(SUPABASE_CHUNKS_TABLE).insert(chunk_data).execute()
                 
                 if chunk_result.data:
                     # Now prepare Pinecone vectors with the actual chunk_ids
@@ -474,6 +497,96 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
 def main_daily():
     """Process articles created today."""
     df = read_todays_articles()
+    proc_df = preprocess_articles(df)
+    write_processed_articles_to_supabase_and_pinecone(proc_df)
+
+def read_articles_from_days(days: int) -> pd.DataFrame:
+    """Read articles from the last N days from Supabase."""
+    from datetime import datetime, timedelta
+    
+    # Calculate date range
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    
+    # Format dates for Supabase query
+    start_date_str = start_date.strftime('%Y-%m-%d')
+    end_date_str = end_date.strftime('%Y-%m-%d')
+    
+    log.info(f"Fetching articles from {start_date_str} to {end_date_str}")
+    
+    # First, count the total number of articles in the date range
+    count_result = supabase.table("source_articles") \
+        .select("*", count="exact") \
+        .gte("published", start_date_str) \
+        .lte("published", end_date_str) \
+        .execute()
+    
+    total_count = count_result.count
+    log.info(f"Found {total_count} articles in the date range")
+    
+    if total_count == 0:
+        log.warning(f"No articles found in database for the last {days} days.")
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
+    
+    # Use pagination to fetch all articles (Supabase has a 1000 row limit)
+    all_articles = []
+    batch_size = 1000
+    
+    for offset in range(0, total_count, batch_size):
+        end_range = min(offset + batch_size - 1, total_count - 1)
+        log.info(f"Fetching articles {offset} to {end_range} of {total_count}")
+        
+        batch_result = supabase.table("source_articles") \
+            .select("*") \
+            .gte("published", start_date_str) \
+            .lte("published", end_date_str) \
+            .range(offset, end_range) \
+            .execute()
+        
+        all_articles.extend(batch_result.data)
+    
+    df = pd.DataFrame(all_articles)
+    
+    # Debug: Print available columns
+    log.info(f"Available columns from Supabase: {list(df.columns)}")
+    log.info(f"Number of rows returned: {len(df)}")
+    if len(df) > 0:
+        log.info(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
+    
+    # Handle empty DataFrame
+    if len(df) == 0:
+        log.warning(f"No articles found in database for the last {days} days.")
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
+    
+    # Map columns to expected format
+    column_mapping = {
+        'id': 'id',
+        'published': 'date',
+        'title': 'title',
+        'content': 'text'
+    }
+    
+    # Rename columns
+    df = df.rename(columns=column_mapping)
+    
+    # Ensure required columns exist
+    required = {"id", "date", "title", "text"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns after mapping: {missing!r}")
+    
+    return df
+
+def main_days(days: int):
+    """Process articles from the last N days."""
+    df = read_articles_from_days(days)
+    
+    if len(df) == 0:
+        log.warning(f"No articles found for the last {days} days. Nothing to process.")
+        return
+    
+    log.info(f"Processing {len(df)} articles from the last {days} days")
     proc_df = preprocess_articles(df)
     write_processed_articles_to_supabase_and_pinecone(proc_df)
 

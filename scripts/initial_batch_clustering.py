@@ -2,11 +2,12 @@
 """
 initial_batch_clustering.py
 
-Simple script to run clustering.simulate() on the last two weeks of articles
+Simple script to run clustering.simulate() on articles from the last N days
 and save the results to the database.
 """
 
 import sys
+import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -17,13 +18,28 @@ from clustering import simulate
 from db_utils import save_clustering_results_to_db
 
 def main():
-    """Test clustering.simulate on the last two weeks of data."""
+    """Run clustering.simulate on articles from the last N days."""
     
-    # Hard-coded clustering parameters
-    window_size = 14        # days
-    slide_size = 7          # days  
-    num_windows = 10        # number of sliding windows
-    min_articles = 5        # minimum articles per cluster
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Initial batch clustering for articles from the last N days')
+    parser.add_argument('--days', type=int, default=30, 
+                       help='Number of days ago to include articles from (default: 30)')
+    parser.add_argument('--window-size', type=int, default=14,
+                       help='Window size in days (default: 14)')
+    parser.add_argument('--slide-size', type=int, default=7,
+                       help='Slide size in days (default: 7)')
+    parser.add_argument('--num-windows', type=int, default=10,
+                       help='Number of sliding windows (default: 10)')
+    parser.add_argument('--min-articles', type=int, default=6,
+                       help='Minimum articles per cluster (default: 6)')
+    
+    args = parser.parse_args()
+    
+    # Clustering parameters
+    window_size = args.window_size
+    slide_size = args.slide_size
+    num_windows = args.num_windows
+    min_articles = args.min_articles
     N = 10                  # top N keywords
     T = 4                   # similarity threshold parameter
     keyword_score = "tfidf" # keyword scoring method
@@ -31,9 +47,9 @@ def main():
     time_aware = True       # time-aware clustering
     theme_aware = True      # theme-aware clustering
     
-    # Calculate date range for last two weeks
+    # Calculate date range for last N days
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=14)
+    start_date = end_date - timedelta(days=args.days)
     
     # Format dates as strings
     start_date_str = start_date.strftime('%Y-%m-%d')
@@ -41,7 +57,7 @@ def main():
     
     print("🚀 Starting clustering simulation")
     print("=" * 60)
-    print(f"📅 Date range: {start_date_str} to {end_date_str}")
+    print(f"📅 Date range: {start_date_str} to {end_date_str} (last {args.days} days)")
     print(f"📊 Parameters:")
     print(f"   • Window size: {window_size} days")
     print(f"   • Slide size: {slide_size} days")

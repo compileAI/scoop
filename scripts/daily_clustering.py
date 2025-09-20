@@ -232,13 +232,13 @@ def main():
     # Hard-coded clustering parameters (matching initial_batch_clustering.py)
     days_back = 0           # Process articles from last N days
     window_size = 14        # Context window for embeddings (days)
-    min_articles = 2        # Minimum articles per new cluster
+    min_articles = 6        # Minimum articles per new cluster
     N = 10                  # Top N keywords
     T = 4                   # Similarity threshold parameter
     keyword_score = "tfidf" # Keyword scoring method
     verbose = True          # Verbose output
     time_aware = True       # Time-aware clustering
-    theme_aware = False     # Theme-aware clustering (disabled - no theme data from DB)
+    theme_aware = True      # Theme-aware clustering (disabled - no theme data from DB)
     
     print("🚀 Starting daily incremental clustering")
     print("=" * 60)
