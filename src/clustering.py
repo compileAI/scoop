@@ -267,8 +267,14 @@ def assign_to_clusters(initial, verbose, window, window_size, to_date, cluster_c
         sentence_raw_weights_all = {}
         article_topN_tfs_all = {}
         for cluster_id in considered_center_indices:
-            sentence_raw_weights_all[cluster_id] = np.array(np.sum(sentence_tfs_all[:,cluster_topN_indices[cluster_id]].multiply(cluster_topN_scores[cluster_id]), axis=1)).ravel()                       
-            article_topN_tfs_all[cluster_id] = article_tfs_all[:,cluster_topN_indices[cluster_id]].toarray()
+            # Only compute theme-aware weights if this cluster has theme data
+            if cluster_id in cluster_topN_indices and cluster_id in cluster_topN_scores:
+                sentence_raw_weights_all[cluster_id] = np.array(np.sum(sentence_tfs_all[:,cluster_topN_indices[cluster_id]].multiply(cluster_topN_scores[cluster_id]), axis=1)).ravel()                       
+                article_topN_tfs_all[cluster_id] = article_tfs_all[:,cluster_topN_indices[cluster_id]].toarray()
+            else:
+                # For clusters without theme data, use uniform weights (all zeros)
+                sentence_raw_weights_all[cluster_id] = np.zeros(sentence_tfs_all.shape[0])
+                article_topN_tfs_all[cluster_id] = np.zeros((article_tfs_all.shape[0], 0))
             
     if time_aware:
         time_weighted_center_dic = {}

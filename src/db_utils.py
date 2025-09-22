@@ -458,11 +458,15 @@ def assign_articles_to_cluster(cluster_id: int,
         assignments = []
         for i, article_id in enumerate(article_ids):
             similarity = similarities[i] if similarities else 0.0
+            # Convert numpy types to native Python types for JSON serialization
+            similarity = float(similarity) if similarity is not None else 0.0
+            cluster_id_int = int(cluster_id)
+            
             assignments.append({
-                "source_article_id": article_id,
-                "cluster_id": cluster_id,
+                "source_article_id": str(article_id),
+                "cluster_id": cluster_id_int,
                 "similarity_score": similarity,
-                "assignment_type": assignment_type
+                "assignment_type": str(assignment_type)
             })
         
         batch_size = 100
