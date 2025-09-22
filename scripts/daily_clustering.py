@@ -367,7 +367,53 @@ def main():
         # 5. Build to_date for time-aware clustering
         to_date = pd.Timestamp(datetime.now().date())  # Use pandas Timestamp to match article dates
         
-        # 5a. Assign to existing clusters
+        # 5a. Get cluster themes first if theme_aware is enabled
+        if theme_aware and len(cluster_centers) > 0:
+            if verbose:
+                print("🎨 Computing cluster themes for theme-aware clustering...")
+            
+            # Create a temporary window with existing cluster assignments to get themes
+            # We need articles that are already assigned to clusters to compute themes
+            temp_window = context_articles.copy()
+            temp_window['cluster'] = -1  # Initialize all as unassigned
+            
+            # Assign some context articles to clusters for theme computation
+            # This is a simplified approach - in practice you might want to be more sophisticated
+            if len(cluster_centers) > 0:
+                # For theme computation, we'll use a subset of context articles
+                # and assign them to clusters based on similarity
+                from sklearn.metrics.pairwise import cosine_similarity
+                context_embeddings = np.vstack(context_articles['embedding'].values)
+                similarities = cosine_similarity(context_embeddings, cluster_centers)
+                
+                # Assign each context article to its most similar cluster
+                for idx, article_idx in enumerate(temp_window.index):
+                    best_cluster = np.argmax(similarities[idx])
+                    temp_window.at[article_idx, 'cluster'] = best_cluster
+            
+            # Now compute cluster themes
+            (cluster_topN_indices, cluster_topN_scores, cluster_topN_probs, _) = get_cluster_theme(
+                window=temp_window,
+                window_size=window_size,
+                to_date=to_date,
+                time_aware=time_aware,
+                cluster_tf_sum_dics=cluster_tf_sum_dics,
+                keyword_score=keyword_score,
+                N=N
+            )
+            
+            if verbose:
+                print(f"   • Raw cluster_topN_indices keys: {list(cluster_topN_indices.keys())[:10]}")
+                print(f"   • cluster_id_mapping keys: {list(cluster_id_mapping.keys())[:10]}")
+            
+            # Note: cluster_topN_indices and cluster_topN_scores already use array indices (0, 1, 2, ...)
+            # which is what assign_to_clusters expects, so no mapping conversion is needed
+            
+            if verbose:
+                print(f"   • Computed themes for {len(cluster_topN_indices)} clusters")
+                print(f"   • Final cluster_topN_indices keys: {list(cluster_topN_indices.keys())[:10]}")
+        
+        # 5b. Assign to existing clusters
         if verbose:
             print("🎯 Assigning articles to existing clusters...")
             print(f"   • New articles to assign: {len(new_articles)}")
@@ -379,6 +425,22 @@ def main():
         # Convert cluster centers to numpy array if needed
         if len(cluster_centers) > 0 and not isinstance(cluster_centers, np.ndarray):
             cluster_centers = np.array(cluster_centers)
+        
+        # Only use theme-aware clustering if we have theme data
+        if theme_aware and cluster_topN_indices:
+            # Filter cluster_topN_probs to only include clusters with theme data
+            filtered_cluster_topN_probs = {k: v for k, v in cluster_topN_probs.items() if k in cluster_topN_indices}
+            cluster_topN_probs = filtered_cluster_topN_probs
+            
+            if verbose:
+                print(f"   • Using theme-aware clustering with {len(cluster_topN_indices)} clusters")
+        else:
+            # Disable theme_aware if no theme data available
+            theme_aware = False
+            cluster_topN_indices = {}
+            cluster_topN_scores = {}
+            if verbose:
+                print("   • No theme data available, using embedding-only clustering")
         
         window, cluster_emb_sum_dics, cluster_tf_sum_dics, _ = assign_to_clusters(
             initial=True,  # Use initial=True to consider all existing clusters
