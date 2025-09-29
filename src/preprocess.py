@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import logging
 import os
 import time
 from typing import List, Iterable
@@ -33,25 +32,12 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 pinecone_index = pc.Index("scraped-sources-gemini")
 
-# Simple logging setup
-logging.basicConfig(
-    level=logging.INFO,  # Back to INFO now that we've debugged
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-
-# Suppress verbose HTTP logging from supabase/httpx
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-
-log = logging.getLogger("preproc")
-
 # spaCy pipeline – blank model + sentencizer (removed lemmatizer to avoid lookup table issues)
 def build_nlp() -> spacy.language.Language:
     nlp = spacy.blank("en")
     nlp.add_pipe("sentencizer")
     # Note: Removed lemmatizer as it requires lookup tables not available in blank model
-    log.info("spaCy pipeline ready: %s", nlp.pipe_names)
+    print(f"spaCy pipeline ready: {nlp.pipe_names}")
     return nlp
 
 nlp = build_nlp()
@@ -103,11 +89,11 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
     Expect columns: id | date | title | text
     Adds: sentences, sentence_tokens, sentence_embds, sentence_counts
     """
-    log.info("Dataframe shape before processing: %s", df.shape)
+    print(f"Dataframe shape before processing: {df.shape}")
     
     # Handle empty DataFrame
     if len(df) == 0:
-        log.warning("Empty DataFrame provided, returning empty processed DataFrame")
+        print("Empty DataFrame provided, returning empty processed DataFrame")
         return pd.DataFrame(columns=['id', 'date', 'title', 'text', 'sentences', 'sentence_counts', 'sentence_tokens', 'sentence_embds'])
     
     required = {"id", "date", "title", "text"}
@@ -124,7 +110,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
     title_none_count = df["title"].isnull().sum()
     text_none_count = df["text"].isnull().sum()
     if title_none_count > 0 or text_none_count > 0:
-        log.info(f"Cleaned {title_none_count} None titles and {text_none_count} None text values")
+        print(f"Cleaned {title_none_count} None titles and {text_none_count} None text values")
 
     # sentence segmentation (title + body)
     titles = df_clean["title"].tolist()
@@ -194,7 +180,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                 embeddings.append(article_embeddings)
         except Exception as e:
             if "429" in str(e) or "RATE_LIMIT_EXCEEDED" in str(e):
-                log.warning(f"Rate limit hit, waiting 60 seconds before retrying...")
+                print(f"Rate limit hit, waiting 60 seconds before retrying...")
                 time.sleep(60)  # Wait a full minute
                 
                 # Retry the same batch with more conservative approach
@@ -230,7 +216,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                                     except Exception as chunk_e:
                                         if "429" in str(chunk_e) or "RATE_LIMIT_EXCEEDED" in str(chunk_e):
                                             chunk_retry_count += 1
-                                            log.warning(f"Chunk retry {chunk_retry_count}/{max_retries}, waiting 30 seconds...")
+                                            print(f"Chunk retry {chunk_retry_count}/{max_retries}, waiting 30 seconds...")
                                             time.sleep(30)
                                         else:
                                             raise chunk_e
@@ -243,13 +229,13 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                     except Exception as retry_e:
                         if "429" in str(retry_e) or "RATE_LIMIT_EXCEEDED" in str(retry_e):
                             retry_count += 1
-                            log.warning(f"Retry {retry_count}/{max_retries}, waiting {60 * retry_count} seconds...")
+                            print(f"Retry {retry_count}/{max_retries}, waiting {60 * retry_count} seconds...")
                             time.sleep(60 * retry_count)  # Exponential backoff
                         else:
                             raise retry_e
                 
                 if retry_count >= max_retries:
-                    log.error(f"Failed to process batch after {max_retries} retries")
+                    print(f"Failed to process batch after {max_retries} retries")
                     raise Exception(f"Max retries exceeded for batch")
             else:
                 raise  # Re-raise if it's not a rate limit error
@@ -261,7 +247,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
     out["sentence_tokens"] = sentence_tokens
     out["sentence_embds"] = embeddings
 
-    log.info("Completed preprocessing - final shape: %s", out.shape)
+    print(f"Completed preprocessing - final shape: {out.shape}")
     return out
 
 def read_todays_articles() -> pd.DataFrame:
@@ -276,14 +262,14 @@ def read_todays_articles() -> pd.DataFrame:
     df = pd.DataFrame(df)
     
     # Debug: Print available columns
-    log.info(f"Available columns from Supabase: {list(df.columns)}")
-    log.info(f"Number of rows returned: {len(df)}")
+    print(f"Available columns from Supabase: {list(df.columns)}")
+    print(f"Number of rows returned: {len(df)}")
     if len(df) > 0:
-        log.info(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
+        print(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
     
     # Handle empty DataFrame
     if len(df) == 0:
-        log.warning("No articles found for today. Consider using --cold_start to process all articles.")
+        print("No articles found for today. Consider using --cold_start to process all articles.")
         # Return empty DataFrame with expected columns
         return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
     
@@ -312,10 +298,10 @@ def read_all_articles() -> pd.DataFrame:
     count_result = supabase.table("source_articles").select("*", count="exact").execute()
     total_count = count_result.count
     
-    log.info(f"Found {total_count} total articles in database")
+    print(f"Found {total_count} total articles in database")
     
     if total_count == 0:
-        log.warning("No articles found in database.")
+        print("No articles found in database.")
         return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
     
     # Use pagination to fetch all articles (Supabase has a 1000 row limit)
@@ -324,7 +310,7 @@ def read_all_articles() -> pd.DataFrame:
     
     for offset in range(0, total_count, batch_size):
         end_range = min(offset + batch_size - 1, total_count - 1)
-        log.info(f"Fetching articles {offset} to {end_range} of {total_count}")
+        print(f"Fetching articles {offset} to {end_range} of {total_count}")
         
         batch_result = supabase.table("source_articles") \
             .select("*") \
@@ -336,14 +322,14 @@ def read_all_articles() -> pd.DataFrame:
     df = pd.DataFrame(all_articles)
     
     # Debug: Print available columns
-    log.info(f"Available columns from Supabase: {list(df.columns)}")
-    log.info(f"Number of rows returned: {len(df)}")
+    print(f"Available columns from Supabase: {list(df.columns)}")
+    print(f"Number of rows returned: {len(df)}")
     if len(df) > 0:
-        log.info(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
+        print(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
     
     # Handle empty DataFrame
     if len(df) == 0:
-        log.warning("No articles found in database.")
+        print("No articles found in database.")
         # Return empty DataFrame with expected columns
         return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
     
@@ -372,7 +358,7 @@ def ensure_pinecone_namespace_exists(namespace: str = "chunks") -> None:
         # Check if namespace exists by trying to describe index stats for the namespace
         stats = pinecone_index.describe_index_stats()
         if namespace not in stats.get('namespaces', {}):
-            log.info(f"Creating Pinecone namespace '{namespace}'")
+            print(f"Creating Pinecone namespace '{namespace}'")
             # Create namespace by upserting a dummy vector with non-zero values and then deleting it
             dummy_vector = {
                 'id': 'dummy_init_vector',
@@ -382,11 +368,11 @@ def ensure_pinecone_namespace_exists(namespace: str = "chunks") -> None:
             pinecone_index.upsert(vectors=[dummy_vector], namespace=namespace)
             # Delete the dummy vector
             pinecone_index.delete(ids=['dummy_init_vector'], namespace=namespace)
-            log.info(f"Pinecone namespace '{namespace}' created successfully")
+            print(f"Pinecone namespace '{namespace}' created successfully")
         else:
-            log.info(f"Pinecone namespace '{namespace}' already exists")
+            print(f"Pinecone namespace '{namespace}' already exists")
     except Exception as e:
-        log.error(f"Error ensuring Pinecone namespace exists: {e}")
+        print(f"Error ensuring Pinecone namespace exists: {e}")
         raise
 
 def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> None:
@@ -397,7 +383,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
         proc_df: DataFrame with columns: id, date, title, text, sentences, 
                 sentence_counts, sentence_tokens, sentence_embds
     """
-    log.info(f"Writing {len(proc_df)} processed articles to Supabase and Pinecone")
+    print(f"Writing {len(proc_df)} processed articles to Supabase and Pinecone")
     
     # Ensure the Pinecone namespace exists
     ensure_pinecone_namespace_exists("source_article_clustering_chunks")
@@ -424,11 +410,11 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
             ).execute()
             
             if not article_result.data:
-                log.error(f"Failed to upsert article {idx}")
+                print(f"Failed to upsert article {idx}")
                 continue
                 
             source_article_id = row['id']  # Original string ID, now the unique identifier
-            log.debug(f"Upserted article with source_article_id: {source_article_id}")
+            print(f"Upserted article with source_article_id: {source_article_id}")
             
             # Process each sentence as a chunk
             sentences = row['sentences']
@@ -440,7 +426,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
                 # Delete old Pinecone vectors
                 old_chunk_ids = [str(chunk['chunk_id']) for chunk in existing_chunks.data]
                 pinecone_index.delete(ids=old_chunk_ids, namespace="source_article_clustering_chunks")
-                log.debug(f"Deleted {len(old_chunk_ids)} old Pinecone vectors for source_article_id: {source_article_id}")
+                print(f"Deleted {len(old_chunk_ids)} old Pinecone vectors for source_article_id: {source_article_id}")
             
             # Delete existing chunks from database
             supabase.table(SUPABASE_CHUNKS_TABLE).delete().eq('source_article_id', source_article_id).execute()
@@ -484,15 +470,15 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
                             namespace="source_article_clustering_chunks"
                         )
                         total_chunks += len(pinecone_vectors)
-                        log.debug(f"Upserted {len(pinecone_vectors)} vectors to Pinecone for source_article_id: {source_article_id}")
+                        print(f"Upserted {len(pinecone_vectors)} vectors to Pinecone for source_article_id: {source_article_id}")
                 else:
-                    log.error(f"Failed to insert chunks for source_article_id: {source_article_id}")
+                    print(f"Failed to insert chunks for source_article_id: {source_article_id}")
             
         except Exception as e:
-            log.error(f"Error processing article {idx}: {e}")
+            print(f"Error processing article {idx}: {e}")
             continue
     
-    log.info(f"Successfully wrote {len(proc_df)} articles and {total_chunks} chunks to database and Pinecone")
+    print(f"Successfully wrote {len(proc_df)} articles and {total_chunks} chunks to database and Pinecone")
 
 def main_daily():
     """Process articles created today."""
@@ -512,7 +498,7 @@ def read_articles_from_days(days: int) -> pd.DataFrame:
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
     
-    log.info(f"Fetching articles from {start_date_str} to {end_date_str}")
+    print(f"Fetching articles from {start_date_str} to {end_date_str}")
     
     # First, count the total number of articles in the date range
     count_result = supabase.table("source_articles") \
@@ -522,10 +508,10 @@ def read_articles_from_days(days: int) -> pd.DataFrame:
         .execute()
     
     total_count = count_result.count
-    log.info(f"Found {total_count} articles in the date range")
+    print(f"Found {total_count} articles in the date range")
     
     if total_count == 0:
-        log.warning(f"No articles found in database for the last {days} days.")
+        print(f"No articles found in database for the last {days} days.")
         return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
     
     # Use pagination to fetch all articles (Supabase has a 1000 row limit)
@@ -534,7 +520,7 @@ def read_articles_from_days(days: int) -> pd.DataFrame:
     
     for offset in range(0, total_count, batch_size):
         end_range = min(offset + batch_size - 1, total_count - 1)
-        log.info(f"Fetching articles {offset} to {end_range} of {total_count}")
+        print(f"Fetching articles {offset} to {end_range} of {total_count}")
         
         batch_result = supabase.table("source_articles") \
             .select("*") \
@@ -548,14 +534,14 @@ def read_articles_from_days(days: int) -> pd.DataFrame:
     df = pd.DataFrame(all_articles)
     
     # Debug: Print available columns
-    log.info(f"Available columns from Supabase: {list(df.columns)}")
-    log.info(f"Number of rows returned: {len(df)}")
+    print(f"Available columns from Supabase: {list(df.columns)}")
+    print(f"Number of rows returned: {len(df)}")
     if len(df) > 0:
-        log.info(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
+        print(f"Sample row keys: {list(df.iloc[0].keys()) if len(df) > 0 else 'No data'}")
     
     # Handle empty DataFrame
     if len(df) == 0:
-        log.warning(f"No articles found in database for the last {days} days.")
+        print(f"No articles found in database for the last {days} days.")
         # Return empty DataFrame with expected columns
         return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
     
@@ -583,10 +569,10 @@ def main_days(days: int):
     df = read_articles_from_days(days)
     
     if len(df) == 0:
-        log.warning(f"No articles found for the last {days} days. Nothing to process.")
+        print(f"No articles found for the last {days} days. Nothing to process.")
         return
     
-    log.info(f"Processing {len(df)} articles from the last {days} days")
+    print(f"Processing {len(df)} articles from the last {days} days")
     proc_df = preprocess_articles(df)
     write_processed_articles_to_supabase_and_pinecone(proc_df)
 
@@ -597,7 +583,7 @@ def main_all(limit=None):
     # Apply limit if specified
     if limit:
         df = df.head(limit)
-        log.info(f"Limited to {len(df)} articles for testing")
+        print(f"Limited to {len(df)} articles for testing")
     
     proc_df = preprocess_articles(df)
     write_processed_articles_to_supabase_and_pinecone(proc_df)
