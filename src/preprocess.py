@@ -190,7 +190,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                     try:
                         if len(batch) <= max_batch_size:
                             batch_embeddings = client.models.embed_content(
-                                model="text-embedding-004",
+                                model="gemini-embedding-001",
                                 contents=batch,
                             )
                             actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
@@ -207,7 +207,7 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
                                 while chunk_retry_count < max_retries:
                                     try:
                                         chunk_embeddings = client.models.embed_content(
-                                            model="text-embedding-004",
+                                            model="gemini-embedding-001",
                                             contents=chunk,
                                         )
                                         actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
