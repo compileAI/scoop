@@ -447,7 +447,7 @@ def read_unprocessed_articles(days: int = 3) -> pd.DataFrame:
     unprocessed = recent_articles[~recent_articles['id'].isin(processed_ids)].copy()
     
     # Sort by date descending (most recent first)
-    unprocessed['date'] = pd.to_datetime(unprocessed['date'])
+    unprocessed['date'] = pd.to_datetime(unprocessed['date'], format='ISO8601')
     unprocessed = unprocessed.sort_values('date', ascending=False)
     
     print(f"Found {len(unprocessed)} unprocessed articles")
@@ -493,7 +493,7 @@ def read_unprocessed_articles(days: int = 3) -> pd.DataFrame:
     unprocessed = recent_articles[~recent_articles['id'].isin(processed_ids)].copy()
     
     # Sort by date descending (most recent first)
-    unprocessed['date'] = pd.to_datetime(unprocessed['date'])
+    unprocessed['date'] = pd.to_datetime(unprocessed['date'], format='ISO8601')
     unprocessed = unprocessed.sort_values('date', ascending=False)
     
     print(f"Found {len(unprocessed)} unprocessed articles")
