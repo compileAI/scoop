@@ -5,7 +5,6 @@ import os
 import time
 from typing import List, Iterable
 
-from google import genai
 from google.genai import types
 import pandas as pd
 import spacy
@@ -21,13 +20,14 @@ from data_types import (
     SUPABASE_ARTICLES_TABLE,
     SUPABASE_CHUNKS_TABLE,
 )
+from gemini_api_manager import get_gemini_manager, DailyQuotaExhausted
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 
-client = genai.Client(api_key=GOOGLE_API_KEY)
+# Initialize Gemini API manager with key rotation
+gemini_manager = get_gemini_manager()
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 pinecone_index = pc.Index("scraped-sources-gemini")
@@ -138,107 +138,36 @@ def preprocess_articles(df: pd.DataFrame, batch_size: int = 64) -> pd.DataFrame:
         sentence_tokens.append(flat_tokens[idx : idx + count])
         idx += count
 
-    # Embedding with proper batching to respect Google API limits (max 100 requests per batch)
-    # API limit: 150 requests per minute, so we need more conservative timing to be safe
+    # Embedding with automatic key rotation (handled by GeminiApiManager)
     embeddings = []
     max_batch_size = 100  # Google API limit
-    requests_per_minute = 120  # More conservative rate limit (leave bigger buffer)
-    delay_between_requests = 60.0 / requests_per_minute  # 0.5 seconds between requests
     
     for i, batch in enumerate(tqdm(sentences, desc="Embedding sentences", total=len(sentences))):
-        # Add delay after first request to respect rate limits
-        if i > 0:
-            time.sleep(delay_between_requests)
-            
-        try:
-            if len(batch) <= max_batch_size:
-                # Batch fits within API limit
-                batch_embeddings = client.models.embed_content(
+        if len(batch) <= max_batch_size:
+            # Batch fits within API limit - manager handles rate limits automatically
+            batch_embeddings = gemini_manager.embed_content(
+                model="gemini-embedding-001",
+                contents=batch,
+                task_type="CLUSTERING",
+                output_dimensionality=768
+            )
+            # Extract the actual embedding values correctly
+            actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
+            embeddings.append(actual_embeddings)
+        else:
+            # Split large batches into smaller chunks
+            article_embeddings = []
+            for chunk_start in range(0, len(batch), max_batch_size):
+                chunk = batch[chunk_start:chunk_start + max_batch_size]
+                chunk_embeddings = gemini_manager.embed_content(
                     model="gemini-embedding-001",
-                    contents=batch,
-                    config=types.EmbedContentConfig(task_type="CLUSTERING", output_dimensionality=768)
+                    contents=chunk,
+                    task_type="CLUSTERING",
+                    output_dimensionality=768
                 )
-                # Extract the actual embedding values correctly
-                actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
-                embeddings.append(actual_embeddings)
-            else:
-                # Split large batches into smaller chunks
-                article_embeddings = []
-                for j, chunk_start in enumerate(range(0, len(batch), max_batch_size)):
-                    # Add delay between chunk requests too
-                    if j > 0:
-                        time.sleep(delay_between_requests)
-                        
-                    chunk = batch[chunk_start:chunk_start + max_batch_size]
-                    chunk_embeddings = client.models.embed_content(
-                        model="gemini-embedding-001",
-                        contents=chunk,
-                        config=types.EmbedContentConfig(task_type="CLUSTERING", output_dimensionality=768)
-                    )
-                    actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
-                    article_embeddings.extend(actual_embeddings)
-                embeddings.append(article_embeddings)
-        except Exception as e:
-            if "429" in str(e) or "RATE_LIMIT_EXCEEDED" in str(e):
-                print(f"Rate limit hit, waiting 60 seconds before retrying...")
-                time.sleep(60)  # Wait a full minute
-                
-                # Retry the same batch with more conservative approach
-                max_retries = 3
-                retry_count = 0
-                while retry_count < max_retries:
-                    try:
-                        if len(batch) <= max_batch_size:
-                            batch_embeddings = client.models.embed_content(
-                                model="gemini-embedding-001",
-                                contents=batch,
-                            )
-                            actual_embeddings = [emb.values for emb in batch_embeddings.embeddings]
-                            embeddings.append(actual_embeddings)
-                            break  # Success, exit retry loop
-                        else:
-                            # Handle large batch retry
-                            article_embeddings = []
-                            for chunk_start in range(0, len(batch), max_batch_size):
-                                chunk = batch[chunk_start:chunk_start + max_batch_size]
-                                
-                                # Retry each chunk if needed
-                                chunk_retry_count = 0
-                                while chunk_retry_count < max_retries:
-                                    try:
-                                        chunk_embeddings = client.models.embed_content(
-                                            model="gemini-embedding-001",
-                                            contents=chunk,
-                                        )
-                                        actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
-                                        article_embeddings.extend(actual_embeddings)
-                                        break  # Success, exit chunk retry loop
-                                    except Exception as chunk_e:
-                                        if "429" in str(chunk_e) or "RATE_LIMIT_EXCEEDED" in str(chunk_e):
-                                            chunk_retry_count += 1
-                                            print(f"Chunk retry {chunk_retry_count}/{max_retries}, waiting 30 seconds...")
-                                            time.sleep(30)
-                                        else:
-                                            raise chunk_e
-                                
-                                # Add delay between chunks
-                                if chunk_start + max_batch_size < len(batch):
-                                    time.sleep(delay_between_requests * 2)  # Double delay for safety
-                            embeddings.append(article_embeddings)
-                            break  # Success, exit retry loop
-                    except Exception as retry_e:
-                        if "429" in str(retry_e) or "RATE_LIMIT_EXCEEDED" in str(retry_e):
-                            retry_count += 1
-                            print(f"Retry {retry_count}/{max_retries}, waiting {60 * retry_count} seconds...")
-                            time.sleep(60 * retry_count)  # Exponential backoff
-                        else:
-                            raise retry_e
-                
-                if retry_count >= max_retries:
-                    print(f"Failed to process batch after {max_retries} retries")
-                    raise Exception(f"Max retries exceeded for batch")
-            else:
-                raise  # Re-raise if it's not a rate limit error
+                actual_embeddings = [emb.values for emb in chunk_embeddings.embeddings]
+                article_embeddings.extend(actual_embeddings)
+            embeddings.append(article_embeddings)
 
     # assemble dataframe using the cleaned data
     out = df_clean.copy()
@@ -480,11 +409,167 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
     
     print(f"Successfully wrote {len(proc_df)} articles and {total_chunks} chunks to database and Pinecone")
 
+def read_unprocessed_articles(days: int = 3) -> pd.DataFrame:
+    """
+    Read articles from the last N days that haven't been preprocessed yet.
+    Returns articles ordered by date descending (most recent first).
+    
+    Args:
+        days: Number of days to look back (default: 3)
+        
+    Returns:
+        DataFrame of unprocessed articles, sorted by date descending
+    """
+    print(f"Checking for unprocessed articles from the last {days} days")
+    
+    # Get articles from last N days
+    recent_articles = read_articles_from_days(days)
+    
+    if len(recent_articles) == 0:
+        print(f"No articles found in the last {days} days")
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
+    
+    print(f"Found {len(recent_articles)} total articles from the last {days} days")
+    
+    # Get all processed article IDs
+    try:
+        processed_result = supabase.table(SUPABASE_ARTICLES_TABLE) \
+            .select("source_article_id") \
+            .execute()
+        
+        processed_ids = set(r['source_article_id'] for r in processed_result.data)
+        print(f"Found {len(processed_ids)} already processed articles")
+    except Exception as e:
+        print(f"Error fetching processed articles: {e}")
+        processed_ids = set()
+    
+    # Filter to unprocessed articles only
+    unprocessed = recent_articles[~recent_articles['id'].isin(processed_ids)].copy()
+    
+    # Sort by date descending (most recent first)
+    unprocessed['date'] = pd.to_datetime(unprocessed['date'])
+    unprocessed = unprocessed.sort_values('date', ascending=False)
+    
+    print(f"Found {len(unprocessed)} unprocessed articles")
+    
+    return unprocessed
+
+
+def read_unprocessed_articles(days: int = 3) -> pd.DataFrame:
+    """
+    Read articles from the last N days that haven't been preprocessed yet.
+    Returns articles ordered by date descending (most recent first).
+    
+    Args:
+        days: Number of days to look back (default: 3)
+        
+    Returns:
+        DataFrame of unprocessed articles, sorted by date descending
+    """
+    print(f"Checking for unprocessed articles from the last {days} days")
+    
+    # Get articles from last N days
+    recent_articles = read_articles_from_days(days)
+    
+    if len(recent_articles) == 0:
+        print(f"No articles found in the last {days} days")
+        return pd.DataFrame(columns=['id', 'date', 'title', 'text'])
+    
+    print(f"Found {len(recent_articles)} total articles from the last {days} days")
+    
+    # Get all processed article IDs
+    try:
+        processed_result = supabase.table(SUPABASE_ARTICLES_TABLE) \
+            .select("source_article_id") \
+            .execute()
+        
+        processed_ids = set(r['source_article_id'] for r in processed_result.data)
+        print(f"Found {len(processed_ids)} already processed articles")
+    except Exception as e:
+        print(f"Error fetching processed articles: {e}")
+        processed_ids = set()
+    
+    # Filter to unprocessed articles only
+    unprocessed = recent_articles[~recent_articles['id'].isin(processed_ids)].copy()
+    
+    # Sort by date descending (most recent first)
+    unprocessed['date'] = pd.to_datetime(unprocessed['date'])
+    unprocessed = unprocessed.sort_values('date', ascending=False)
+    
+    print(f"Found {len(unprocessed)} unprocessed articles")
+    
+    return unprocessed
+
+
 def main_daily():
-    """Process articles created today."""
-    df = read_todays_articles()
-    proc_df = preprocess_articles(df)
-    write_processed_articles_to_supabase_and_pinecone(proc_df)
+    """
+    Process unprocessed articles from the last 3 days, one at a time.
+    Most recent articles are processed first.
+    """
+    print("=" * 80)
+    print("Starting incremental daily preprocessing")
+    print("=" * 80)
+    
+    # Get unprocessed articles from last 3 days
+    df = read_unprocessed_articles(days=3)
+    
+    if len(df) == 0:
+        print("✅ No unprocessed articles found. All caught up!")
+        return
+    
+    print(f"📋 Processing {len(df)} unprocessed articles (most recent first)")
+    print(f"📅 Date range: {df['date'].min()} to {df['date'].max()}")
+    print("=" * 80)
+    
+    successful_count = 0
+    failed_count = 0
+    failed_ids = []
+    
+    for idx, (row_idx, row) in enumerate(df.iterrows(), 1):
+        article_id = row['id']
+        article_date = row['date']
+        
+        try:
+            print(f"\n[{idx}/{len(df)}] Processing article {article_id} from {article_date}")
+            
+            # Process single article
+            single_df = pd.DataFrame([row])
+            proc_df = preprocess_articles(single_df, batch_size=64)
+            
+            # Write immediately to database
+            write_processed_articles_to_supabase_and_pinecone(proc_df)
+            
+            successful_count += 1
+            print(f"✅ Successfully processed article {article_id} ({successful_count}/{len(df)} completed)")
+            
+        except DailyQuotaExhausted as e:
+            print("=" * 80)
+            print("❌ DAILY QUOTA EXHAUSTED")
+            print("=" * 80)
+            print(f"Processed {successful_count} articles successfully before hitting quota")
+            print(f"Remaining: {len(df) - idx} unprocessed articles")
+            print("These will be automatically retried on the next run.")
+            print(f"Error details: {str(e)[:200]}")
+            print("=" * 80)
+            break
+            
+        except Exception as e:
+            failed_count += 1
+            failed_ids.append(article_id)
+            print(f"❌ Failed to process article {article_id}: {str(e)[:200]}")
+            print(f"Continuing with next article... ({failed_count} failures so far)")
+            continue
+    
+    # Final summary
+    print("=" * 80)
+    print("Daily preprocessing complete")
+    print("=" * 80)
+    print(f"✅ Successfully processed: {successful_count} articles")
+    if failed_count > 0:
+        print(f"❌ Failed: {failed_count} articles")
+        print(f"Failed article IDs: {failed_ids}")
+    print(f"📊 Total processed this run: {successful_count + failed_count} / {len(df)}")
+    print("=" * 80)
 
 def read_articles_from_days(days: int) -> pd.DataFrame:
     """Read articles from the last N days from Supabase."""
