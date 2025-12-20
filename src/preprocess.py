@@ -328,7 +328,7 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
                 'sentence_counts': int(row['sentence_counts']),
                 'title': row['title'],
                 'text': row['text'],
-                'date': row['date']
+                'date': pd.Timestamp(row['date']).isoformat() if pd.notna(row['date']) else None
             }
             
             # Upsert into cleaned_source_articles (insert or update if exists)
@@ -374,6 +374,15 @@ def write_processed_articles_to_supabase_and_pinecone(proc_df: pd.DataFrame) -> 
             # Batch insert chunks to get chunk_ids
             if chunk_data:
                 chunk_result = supabase.table(SUPABASE_CHUNKS_TABLE).insert(chunk_data).execute()
+
+                # Quick error checks
+                if hasattr(chunk_result, 'error') and chunk_result.error:
+                    print(f"❌ Supabase error: {chunk_result.error} for article {source_article_id}")
+                    continue
+
+                if not chunk_result.data or len(chunk_result.data) != len(chunk_data):
+                    print(f"⚠️ Chunk insert failed: expected {len(chunk_data)}, got {len(chunk_result.data or [])} for article {source_article_id}")
+                    continue
                 
                 if chunk_result.data:
                     # Now prepare Pinecone vectors with the actual chunk_ids
@@ -588,8 +597,8 @@ def read_articles_from_days(days: int) -> pd.DataFrame:
     # First, count the total number of articles in the date range
     count_result = supabase.table("source_articles") \
         .select("*", count="exact") \
-        .gte("published", start_date_str) \
-        .lte("published", end_date_str) \
+        .gte("created_at", start_date_str) \
+        .lte("created_at", end_date_str) \
         .execute()
     
     total_count = count_result.count
@@ -609,8 +618,8 @@ def read_articles_from_days(days: int) -> pd.DataFrame:
         
         batch_result = supabase.table("source_articles") \
             .select("*") \
-            .gte("published", start_date_str) \
-            .lte("published", end_date_str) \
+            .gte("created_at", start_date_str) \
+            .lte("created_at", end_date_str) \
             .range(offset, end_range) \
             .execute()
         

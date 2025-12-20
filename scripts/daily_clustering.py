@@ -8,7 +8,7 @@ Processes new articles within the context of a broader time window for proper em
 
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
@@ -28,8 +28,8 @@ from db_utils import (
 def load_and_prepare_data(days_back: int, window_size: int, verbose: bool):
     """Load new articles and context window for proper embedding computation."""
     
-    # Calculate date ranges
-    now = datetime.now()
+    # Calculate date ranges (use UTC to match database timezone)
+    now = datetime.now(timezone.utc)
     new_articles_since = (now - timedelta(days=days_back)).replace(hour=0, minute=0, second=0, microsecond=0)
     context_since = (now - timedelta(days=window_size)).replace(hour=0, minute=0, second=0, microsecond=0)
     
@@ -52,7 +52,7 @@ def load_and_prepare_data(days_back: int, window_size: int, verbose: bool):
         return None, None, None, None
     
     # Extract new articles from context
-    new_articles = context_articles[context_articles['date'] >= new_articles_since].copy()
+    new_articles = context_articles[context_articles['created_at'] >= new_articles_since].copy()
     
     # Load existing clusters
     existing_clusters = load_active_clusters()

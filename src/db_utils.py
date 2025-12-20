@@ -181,6 +181,10 @@ def fetch_articles_from_supabase(date_filter: str,
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'], format='ISO8601')
         
+        # Convert created_at column to datetime
+        if 'created_at' in df.columns:
+            df['created_at'] = pd.to_datetime(df['created_at'], format='ISO8601')
+        
         print(f"INFO: Successfully fetched {len(df)} articles from database")
         return df
         
@@ -188,8 +192,9 @@ def fetch_articles_from_supabase(date_filter: str,
         print(f"ERROR: Error fetching articles from database: {e}")
         return pd.DataFrame()
 
+# NOTE: when batch size is too big, we run into the 1000 entry limit from supabase. Keeping it at 40 to avoid this. Add pagination in the future.
 def fetch_chunks_for_articles(article_ids: List[str], 
-                            batch_size: int = 128) -> ChunksDict:
+                            batch_size: int = 40) -> ChunksDict:
     """
     Fetch chunks for given article IDs (batched).
     
@@ -347,6 +352,7 @@ def assemble_processed_articles(articles_df: pd.DataFrame,
             'id': article_id,
             'source_article_id': article_id,
             'date': article.get('date', article.get('created_at')),
+            'created_at': article.get('created_at'),
             'title': article.get('title', ''),
             'text': article.get('text', ''),
             'sentences': sentences,

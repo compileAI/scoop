@@ -36,6 +36,7 @@ class GeminiApiManager:
         self.api_keys = self._load_api_keys()
         self.current_key_index = 0
         self.rate_limited_keys = set()  # Track which keys are currently rate limited
+        self.daily_quota_exhausted_keys = set()  # Track which keys have daily quota exhausted
         self.last_rotation_time = 0
         self.cooldown_period = 70  # seconds (60s rate limit window + 10s buffer)
         self.cooldown_cycles = 0  # Track number of full cooldown cycles
@@ -144,9 +145,12 @@ class GeminiApiManager:
         
         return False
     
-    def _rotate_to_next_key(self) -> bool:
+    def _rotate_to_next_key(self, is_daily_quota: bool = False) -> bool:
         """
         Rotate to the next available API key.
+        
+        Args:
+            is_daily_quota: Whether the current key hit daily quota (vs temporary RPM limit)
         
         Returns:
             bool: True if rotation successful, False if all keys are rate limited
@@ -157,9 +161,20 @@ class GeminiApiManager:
         
         # Mark current key as rate limited
         self.rate_limited_keys.add(self.current_key_index)
-        logger.warning(f"🚫 Key #{self.current_key_index + 1} hit rate limit")
         
-        # Try to find a non-rate-limited key
+        # If this is a daily quota error, mark it separately
+        if is_daily_quota:
+            self.daily_quota_exhausted_keys.add(self.current_key_index)
+            logger.warning(f"🚫 Key #{self.current_key_index + 1} hit DAILY quota limit")
+        else:
+            logger.warning(f"🚫 Key #{self.current_key_index + 1} hit rate limit")
+        
+        # Check if ALL keys have daily quota exhausted
+        if len(self.daily_quota_exhausted_keys) == len(self.api_keys):
+            logger.error("❌ ALL API keys have daily quota exhausted")
+            return False
+        
+        # Try to find a non-rate-limited key (prioritize keys without daily quota exhaustion)
         original_index = self.current_key_index
         attempts = 0
         
@@ -167,18 +182,22 @@ class GeminiApiManager:
             self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
             attempts += 1
             
+            # Skip keys with daily quota exhausted
+            if self.current_key_index in self.daily_quota_exhausted_keys:
+                continue
+            
             if self.current_key_index not in self.rate_limited_keys:
                 self._initialize_current_client()
                 self.last_rotation_time = time.time()
                 logger.info(f"🔄 Rotated to key #{self.current_key_index + 1}")
                 return True
         
-        # All keys are rate limited
-        logger.warning(f"⚠️ All {len(self.api_keys)} API keys are rate limited")
+        # All non-daily-exhausted keys are rate limited (temporary)
+        logger.warning(f"⚠️ All available API keys are temporarily rate limited")
         return False
     
     def _wait_for_cooldown(self, suggested_delay: Optional[float] = None):
-        """Wait for cooldown period and reset rate limited keys."""
+        """Wait for cooldown period and reset temporarily rate limited keys."""
         # Increment cooldown cycle counter
         self.cooldown_cycles += 1
         
@@ -202,11 +221,17 @@ class GeminiApiManager:
         logger.info(f"📊 Cooldown cycle {self.cooldown_cycles}/{self.max_cooldown_cycles}")
         time.sleep(wait_time)
         
-        # Reset rate limited keys and try the first key again
+        # Reset ONLY temporarily rate limited keys (not daily quota exhausted ones)
         self.rate_limited_keys.clear()
-        self.current_key_index = 0
+        
+        # Find first key that doesn't have daily quota exhausted
+        for i in range(len(self.api_keys)):
+            if i not in self.daily_quota_exhausted_keys:
+                self.current_key_index = i
+                break
+        
         self._initialize_current_client()
-        logger.info("🔄 Cooldown complete. Reset to key #1")
+        logger.info(f"🔄 Cooldown complete. Reset to key #{self.current_key_index + 1}")
     
     def _make_api_call(self, api_call_func, max_retries: int = None) -> Any:
         """
@@ -243,24 +268,29 @@ class GeminiApiManager:
                 if self._is_rate_limit_error(e):
                     logger.warning(f"🚫 Rate limit hit on attempt {attempt + 1}")
                     
-                    # Check if this is a daily quota error
-                    if self._is_daily_quota_error(e):
-                        logger.error("❌ Daily quota exhausted for all API keys")
-                        raise DailyQuotaExhausted(
-                            "Daily API quota exhausted. Please wait for quota reset or add more API keys. "
-                            f"Error: {str(e)[:200]}"
-                        )
+                    # Check if this is a daily quota error for the current key
+                    is_daily_quota = self._is_daily_quota_error(e)
                     
                     # Extract suggested retry delay from error
                     delay = self._extract_retry_delay(e)
                     if delay:
                         suggested_delay = delay
                     
-                    # Try to rotate to next key
-                    if self._rotate_to_next_key():
+                    # Try to rotate to next key (pass whether this was daily quota)
+                    rotation_result = self._rotate_to_next_key(is_daily_quota=is_daily_quota)
+                    
+                    # If rotation failed because ALL keys have daily quota exhausted
+                    if not rotation_result and len(self.daily_quota_exhausted_keys) == len(self.api_keys):
+                        logger.error("❌ Daily quota exhausted for ALL API keys")
+                        raise DailyQuotaExhausted(
+                            "Daily API quota exhausted for all keys. Please wait for quota reset or add more API keys. "
+                            f"Error: {str(e)[:200]}"
+                        )
+                    
+                    if rotation_result:
                         continue  # Try again with new key
                     else:
-                        # All keys rate limited - wait for cooldown
+                        # All available keys temporarily rate limited - wait for cooldown
                         try:
                             self._wait_for_cooldown(suggested_delay)
                             suggested_delay = None  # Reset for next cycle
@@ -345,7 +375,8 @@ class GeminiApiManager:
             "total_keys": len(self.api_keys),
             "current_key_index": self.current_key_index,
             "rate_limited_keys": list(self.rate_limited_keys),
-            "available_keys": [i for i in range(len(self.api_keys)) if i not in self.rate_limited_keys]
+            "daily_quota_exhausted_keys": list(self.daily_quota_exhausted_keys),
+            "available_keys": [i for i in range(len(self.api_keys)) if i not in self.rate_limited_keys and i not in self.daily_quota_exhausted_keys]
         }
 
 
